@@ -1,8 +1,8 @@
 {
   "id": "npc-generator",
   "name": "NPC 生成器",
-  "version": "1.0.0",
-  "description": "根据角色人设，AI 生成相关 NPC 并一键添加为好友",
+  "version": "1.3.0",
+  "description": "根据角色人设和侧重点，精准生成 NPC 并添加为好友",
   "author": "你的名字",
   "entry": "https://raw.githubusercontent.com/siyin651-lab/rochenpc/main/plugin.js",
   "hash": "",
