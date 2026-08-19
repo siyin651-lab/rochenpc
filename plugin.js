@@ -1,12 +1,12 @@
 // ============================================================
-// NPC 生成器 v1.1.0
-// 根据角色人设，AI 生成紧密相关的 NPC
+// NPC 生成器 v1.3.0
+// 根据角色人设 + 用户指定的侧重点，精准生成 NPC
 // ============================================================
 
 window.RochePlugin.register({
   id: "npc-generator",
   name: "NPC 生成器",
-  version: "1.1.0",
+  version: "1.3.0",
   apps: [
     {
       id: "npc-generator-home",
@@ -18,10 +18,11 @@ window.RochePlugin.register({
         const state = {
           characters: [],
           selectedCharId: "",
-          generatedNpcs: [],      // { name, handle, bio, persona, relation }
+          generatedNpcs: [],
           loading: false,
           message: "",
           messageType: "info",
+          generationFocus: "comprehensive", // 新增：侧重点
         };
 
         // ---------- 工具函数 ----------
@@ -35,7 +36,7 @@ window.RochePlugin.register({
           return prefix + "_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6);
         }
 
-        // ---------- 数据库操作（直接写入 IndexedDB） ----------
+        // ---------- 数据库操作（与之前相同，已验证可用） ----------
         function openDB() {
           const DB_NAME = "Roche_db";
           const DB_VERSION = 78;
@@ -53,10 +54,12 @@ window.RochePlugin.register({
           const convId = genId("conv");
           const now = Date.now();
 
-          // 将关系信息也融入 persona，使其更丰富
           let fullPersona = npc.persona || "";
           if (npc.relation) {
             fullPersona = `【与主角的关系】${npc.relation}\n${fullPersona}`;
+          }
+          if (npc.source) {
+            fullPersona += `\n【生成依据】${npc.source}`;
           }
 
           const contact = {
@@ -108,10 +111,26 @@ window.RochePlugin.register({
           });
 
           db.close();
+
+          // 验证写入
+          const verifyDb = await openDB();
+          const verifyTx = verifyDb.transaction("contacts", "readonly");
+          const verifyStore = verifyTx.objectStore("contacts");
+          const verifyReq = verifyStore.get(charId);
+          const verifyResult = await new Promise((resolve) => {
+            verifyReq.onsuccess = () => resolve(verifyReq.result);
+            verifyReq.onerror = () => resolve(null);
+          });
+          verifyDb.close();
+
+          if (!verifyResult) {
+            throw new Error("写入后回读失败，数据未持久化");
+          }
+
           return { charId, convId };
         }
 
-        // ---------- 加载角色列表 ----------
+        // ---------- 加载角色 ----------
         async function loadCharacters() {
           try {
             const chars = await roche.character.list();
@@ -124,7 +143,7 @@ window.RochePlugin.register({
           }
         }
 
-        // ---------- 核心：AI 生成 NPC（优化提示词） ----------
+        // ---------- 核心：AI 生成 NPC（增强版） ----------
         async function generateNpcs() {
           if (!state.selectedCharId) {
             showMessage("请先选择一个角色", "error");
@@ -151,51 +170,75 @@ window.RochePlugin.register({
 
           const charName = character.name || "主角";
 
-          // ----- 新的强化提示词 -----
-          const systemPrompt = `你是一位优秀的世界构建师，擅长根据角色人设生成紧密关联的 NPC（非玩家角色）。
+          // ---------- 根据侧重点构建不同的指令 ----------
+          const focusMap = {
+            "family": "重点提取人设中提到的家人、亲属或有血缘关系的人物。",
+            "rival": "重点提取人设中提到的敌人、竞争对手、宿敌。",
+            "mentor": "重点提取人设中提到的老师、前辈、引路人、同门。",
+            "friend": "重点提取人设中提到的朋友、挚友、伙伴。",
+            "comprehensive": "综合提取所有可能的人物关系，包括家人、朋友、敌人、同事等。"
+          };
+          const focusInstruction = focusMap[state.generationFocus] || focusMap["comprehensive"];
+
+          // ---------- 强约束提示词 ----------
+          const systemPrompt = `你是一位严谨的世界构建师。你的任务是从主角的人设中提取出所有可能的相关人物，并生成 NPC。
 
 【主角信息】
 姓名：${charName}
 完整人设：
 ${persona}
 
-【生成任务】
-请仔细阅读以上人设，从中提取与主角相关的线索（如亲友、仇敌、同门、下属、对手、暗恋者、被遗忘的故人等），并生成 **3~5 个 NPC**。
+【生成目标】
+${focusInstruction}
 
-【严格要求】
-1. 每个 NPC 必须与主角有明确的、具体的、可追溯的**关系**（例如：“幼年玩伴，现为敌对阵营的卧底”、“修仙路上的引路人，已失踪多年”、“同门师妹，暗中嫉妒主角的天赋”）。
-2. 关系必须**源自人设中的内容或合理延伸**，不能凭空捏造（比如人设里没提过修仙，就不能出现修仙设定）。
-3. 每个 NPC 需包含以下字段：
+【严格指令】
+1. 仔细阅读以上人设，找出所有与 ${charName} 有关的人物线索（即使只提过一次名字或暗示关系）。
+2. 每个 NPC 必须基于人设中的**具体语句或设定**衍生出来。你需要指出每个 NPC 的**生成依据**，即人设中的哪句话/哪段描述引出了这个 NPC（尽量引用原文）。
+3. 生成 3~5 个 NPC。
+4. 每个 NPC 必须包含以下字段：
    - name：正式姓名（中文）
    - handle：昵称或代号（2~4 字）
    - bio：一句简短的身份介绍（20 字以内）
-   - relation：与 ${charName} 的关系（20 字以内，必须具体）
+   - relation：与 ${charName} 的具体关系（必须具体，如“表妹，家族联姻的牺牲品”）
+   - source：引用人设原文中**至少一句话**作为生成依据（例如：“人设中提到 '主角的堂妹在十年前离家出走'”）
    - persona：详细人设，包括性格、背景、与主角的过往交集（50~100 字）
-4. NPC 的风格、世界观必须与主角人设保持一致。
 
 【输出格式】
-请以**严格的 JSON 数组格式**输出，不要有其他任何文字。示例：
+必须输出严格的 JSON 数组，不要有其他文字。示例（不同侧重点示例）：
+- 侧重亲友：
 [
   {
-    "name": "林暮雪",
-    "handle": "暮雪",
-    "bio": "清冷孤高的剑客，曾是主角的同门师妹",
-    "relation": "同门师妹，因主角犯错而被迫分离",
-    "persona": "性格清冷寡言，剑术超群。幼时被主角从雪地中救起，对主角既感恩又抱有隐秘的竞争之心。..."
+    "name": "林小蝶",
+    "handle": "小蝶",
+    "bio": "主角的胞妹，天真烂漫",
+    "relation": "亲妹妹，主角最疼爱的家人",
+    "source": "人设中提到 '主角有一个妹妹叫林小蝶，自幼体弱多病'",
+    "persona": "..."
+  }
+]
+- 侧重敌对：
+[
+  {
+    "name": "赵无影",
+    "handle": "无影",
+    "bio": "神秘刺客，主角的宿敌",
+    "relation": "宿敌，多次刺杀主角未果",
+    "source": "人设中提到 '赵无影是主角最大的敌人，两人交手七次'",
+    "persona": "..."
   }
 ]`;
 
           state.loading = true;
-          showMessage("AI 正在基于人设生成 NPC，请稍候...", "info");
+          showMessage(`AI 正在从人设中提取“${focusMap[state.generationFocus] || '综合'}”相关 NPC，请稍候...`, "info");
           render();
 
           try {
             const result = await roche.ai.chat({
               messages: [
                 { role: "system", content: systemPrompt },
-                { role: "user", content: "请根据以上主角人设，生成 NPC 列表。" }
+                { role: "user", content: "请根据以上人设和侧重点，生成 NPC 列表。" }
               ],
-              temperature: 0.8,
+              temperature: 0.6, // 更低，更忠实
             });
 
             let rawText = result.text || "";
@@ -221,16 +264,16 @@ ${persona}
               throw new Error("AI 未返回有效的 NPC 列表");
             }
 
-            // 确保每个 NPC 都有 relation 字段（如果没有则占位）
             npcs = npcs.map(n => ({
               ...n,
               relation: n.relation || "与主角有联系",
+              source: n.source || "（未提供来源）",
               persona: n.persona || n.bio || "",
             }));
 
             state.generatedNpcs = npcs;
             state.loading = false;
-            showMessage(`✅ 成功生成 ${npcs.length} 个 NPC！点击「添加好友」即可入库。`, "success");
+            showMessage(`✅ 成功生成 ${npcs.length} 个 NPC！每个 NPC 都附带了「生成依据」，可追溯来源。`, "success");
           } catch (e) {
             state.loading = false;
             showMessage("生成失败：" + e.message, "error");
@@ -238,15 +281,16 @@ ${persona}
           render();
         }
 
-        // ---------- 添加单个 NPC 为好友 ----------
+        // ---------- 添加 ----------
         async function handleAddNpc(npc, index) {
           try {
             await addNpcToDB(npc);
             state.generatedNpcs[index]._added = true;
-            showMessage(`✅ ${npc.name}（${npc.handle}）已添加为好友！刷新页面即可在角色列表看到。`, "success");
+            showMessage(`✅ ${npc.name}（${npc.handle}）已成功写入数据库！\n请刷新 Roche 页面，即可在联系人列表看到。`, "success");
             render();
           } catch (e) {
             showMessage(`❌ 添加 ${npc.name} 失败：` + e.message, "error");
+            console.error("Add NPC error:", e);
           }
         }
 
@@ -268,7 +312,7 @@ ${persona}
           `;
 
           const title = document.createElement("h1");
-          title.textContent = "🧙 NPC 生成器";
+          title.textContent = "🧙 NPC 生成器 v1.3";
           title.style.cssText = "font-size: 24px; margin: 0 0 16px 0; font-weight: 300;";
           root.appendChild(title);
 
@@ -308,18 +352,64 @@ ${persona}
             render();
           };
           charSection.appendChild(charSelect);
-
-          const hint = document.createElement("div");
-          hint.style.cssText = "font-size: 12px; color: #888; margin-top: 4px;";
-          hint.textContent = "💡 生成的 NPC 将严格基于主角的人设（persona），确保关系紧密。";
-          charSection.appendChild(hint);
           root.appendChild(charSection);
+
+          // ---------- 新增：侧重点选择 ----------
+          const focusSection = document.createElement("div");
+          focusSection.style.marginBottom = "16px";
+          const focusLabel = document.createElement("label");
+          focusLabel.textContent = "② 生成侧重点";
+          focusLabel.style.display = "block";
+          focusLabel.style.marginBottom = "6px";
+          focusLabel.style.fontWeight = "500";
+          focusSection.appendChild(focusLabel);
+
+          const focusGroup = document.createElement("div");
+          focusGroup.style.display = "flex";
+          focusGroup.style.gap = "8px";
+          focusGroup.style.flexWrap = "wrap";
+
+          const focusOptions = [
+            { id: "comprehensive", label: "综合" },
+            { id: "family", label: "家人" },
+            { id: "friend", label: "朋友" },
+            { id: "rival", label: "敌对" },
+            { id: "mentor", label: "导师/同门" },
+          ];
+          focusOptions.forEach(f => {
+            const btn = document.createElement("button");
+            btn.textContent = f.label;
+            btn.className = "btn";
+            if (state.generationFocus === f.id) btn.classList.add("active");
+            btn.style.cssText = `
+              padding: 4px 12px;
+              border: 1px solid ${state.generationFocus === f.id ? "#6c5ce7" : "#444"};
+              border-radius: 16px;
+              background: ${state.generationFocus === f.id ? "#6c5ce7" : "#2a2a3e"};
+              color: ${state.generationFocus === f.id ? "#fff" : "#ccc"};
+              cursor: pointer;
+              font-size: 13px;
+              transition: 0.2s;
+            `;
+            btn.onclick = () => {
+              state.generationFocus = f.id;
+              render();
+            };
+            focusGroup.appendChild(btn);
+          });
+          focusSection.appendChild(focusGroup);
+
+          const focusHint = document.createElement("div");
+          focusHint.style.cssText = "font-size: 12px; color: #888; margin-top: 4px;";
+          focusHint.textContent = "💡 选择侧重点后，AI 会从人设中提取对应关系的 NPC，其他无关的不会生成。";
+          focusSection.appendChild(focusHint);
+          root.appendChild(focusSection);
 
           // 生成按钮
           const genSection = document.createElement("div");
           genSection.style.marginBottom = "16px";
           const genBtn = document.createElement("button");
-          genBtn.textContent = state.loading ? "⏳ 生成中..." : "② 生成 NPC（基于人设）";
+          genBtn.textContent = state.loading ? "⏳ 生成中..." : "③ 生成 NPC";
           genBtn.className = "btn primary";
           genBtn.style.cssText = `
             width: 100%; padding: 12px; font-size: 16px;
@@ -331,7 +421,7 @@ ${persona}
           genSection.appendChild(genBtn);
           root.appendChild(genSection);
 
-          // 消息显示
+          // 消息
           if (state.message) {
             const msgBox = document.createElement("div");
             const color = state.messageType === "success" ? "#4caf50" : state.messageType === "error" ? "#f44336" : "#ff9800";
@@ -347,13 +437,13 @@ ${persona}
           // NPC 列表
           if (state.generatedNpcs.length > 0) {
             const listTitle = document.createElement("div");
-            listTitle.textContent = `③ 生成的 NPC（${state.generatedNpcs.length} 个）`;
+            listTitle.textContent = `④ 生成的 NPC（${state.generatedNpcs.length} 个）`;
             listTitle.style.cssText = "font-weight: 500; margin-bottom: 10px; font-size: 15px;";
             root.appendChild(listTitle);
 
             const grid = document.createElement("div");
             grid.style.display = "grid";
-            grid.style.gridTemplateColumns = "repeat(auto-fill, minmax(280px, 1fr))";
+            grid.style.gridTemplateColumns = "repeat(auto-fill, minmax(300px, 1fr))";
             grid.style.gap = "12px";
 
             state.generatedNpcs.forEach((npc, index) => {
@@ -375,7 +465,6 @@ ${persona}
               nameRow.appendChild(nameEl);
               card.appendChild(nameRow);
 
-              // 关系显示（高亮）
               if (npc.relation) {
                 const relationEl = document.createElement("div");
                 relationEl.style.cssText = `
@@ -391,6 +480,17 @@ ${persona}
               bioEl.style.cssText = "font-size: 13px; color: #aaa; margin: 6px 0 8px 0;";
               bioEl.textContent = npc.bio || "";
               card.appendChild(bioEl);
+
+              if (npc.source) {
+                const sourceEl = document.createElement("div");
+                sourceEl.style.cssText = `
+                  font-size: 12px; color: #7ee787; background: rgba(126, 231, 135, 0.08);
+                  padding: 4px 8px; border-radius: 4px; margin-bottom: 6px;
+                  border-left: 2px solid #4caf50;
+                `;
+                sourceEl.textContent = "📝 依据：" + npc.source;
+                card.appendChild(sourceEl);
+              }
 
               const personaEl = document.createElement("div");
               personaEl.style.cssText = "font-size: 12px; color: #9aa0a6; line-height: 1.5; max-height: 60px; overflow: hidden; text-overflow: ellipsis;";
@@ -421,7 +521,7 @@ ${persona}
             root.appendChild(grid);
           }
 
-          // 关闭按钮
+          // 关闭
           const closeBtn = document.createElement("button");
           closeBtn.textContent = "✕ 关闭";
           closeBtn.style.cssText = `
@@ -446,6 +546,11 @@ ${persona}
               .btn.primary:disabled {
                 opacity: 0.5;
                 cursor: not-allowed;
+              }
+              .btn.active {
+                border-color: #6c5ce7 !important;
+                background: #6c5ce7 !important;
+                color: #fff !important;
               }
             `;
             document.head.appendChild(style);
