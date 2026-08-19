@@ -1,12 +1,12 @@
 // ============================================================
-// NPC 生成器 v1.0
-// 根据角色人设，AI 生成相关 NPC 并添加为好友
+// NPC 生成器 v1.1.0
+// 根据角色人设，AI 生成紧密相关的 NPC
 // ============================================================
 
 window.RochePlugin.register({
   id: "npc-generator",
   name: "NPC 生成器",
-  version: "1.0.0",
+  version: "1.1.0",
   apps: [
     {
       id: "npc-generator-home",
@@ -18,7 +18,7 @@ window.RochePlugin.register({
         const state = {
           characters: [],
           selectedCharId: "",
-          generatedNpcs: [],      // { name, handle, bio, persona }
+          generatedNpcs: [],      // { name, handle, bio, persona, relation }
           loading: false,
           message: "",
           messageType: "info",
@@ -53,20 +53,24 @@ window.RochePlugin.register({
           const convId = genId("conv");
           const now = Date.now();
 
-          // 1. 写入 contacts
+          // 将关系信息也融入 persona，使其更丰富
+          let fullPersona = npc.persona || "";
+          if (npc.relation) {
+            fullPersona = `【与主角的关系】${npc.relation}\n${fullPersona}`;
+          }
+
           const contact = {
             id: charId,
             name: npc.name || "未命名",
             handle: npc.handle || npc.name || "NPC",
             bio: npc.bio || "",
-            persona: npc.persona || npc.bio || "",
+            persona: fullPersona,
             avatar: "",
             conversationId: convId,
             createdAt: now,
             updatedAt: now,
           };
 
-          // 2. 写入 conversations（单聊）
           const conversation = {
             id: convId,
             contactId: charId,
@@ -86,26 +90,20 @@ window.RochePlugin.register({
           const convStore = tx.objectStore("conversations");
 
           await new Promise((resolve, reject) => {
-            const req1 = contactStore.add(contact);
-            req1.onsuccess = () => {};
-            req1.onerror = () => reject(req1.error);
-
-            const req2 = convStore.add(conversation);
-            req2.onsuccess = () => {};
-            req2.onerror = () => reject(req2.error);
-
-            // 等待两个都完成
             let completed = 0;
             let hasError = false;
+            const req1 = contactStore.add(contact);
             req1.onsuccess = () => {
               completed++;
               if (completed === 2 && !hasError) resolve();
             };
+            req1.onerror = (e) => { hasError = true; reject(e); };
+
+            const req2 = convStore.add(conversation);
             req2.onsuccess = () => {
               completed++;
               if (completed === 2 && !hasError) resolve();
             };
-            req1.onerror = (e) => { hasError = true; reject(e); };
             req2.onerror = (e) => { hasError = true; reject(e); };
           });
 
@@ -126,7 +124,7 @@ window.RochePlugin.register({
           }
         }
 
-        // ---------- 核心：AI 生成 NPC ----------
+        // ---------- 核心：AI 生成 NPC（优化提示词） ----------
         async function generateNpcs() {
           if (!state.selectedCharId) {
             showMessage("请先选择一个角色", "error");
@@ -153,52 +151,60 @@ window.RochePlugin.register({
 
           const charName = character.name || "主角";
 
-          const systemPrompt = `你是一位优秀的世界构建师。请根据以下角色人设，生成 3~5 个与该角色有紧密联系的 NPC（非玩家角色）。
+          // ----- 新的强化提示词 -----
+          const systemPrompt = `你是一位优秀的世界构建师，擅长根据角色人设生成紧密关联的 NPC（非玩家角色）。
 
-角色姓名：${charName}
-角色人设：
+【主角信息】
+姓名：${charName}
+完整人设：
 ${persona}
 
-生成要求：
-1. 每个 NPC 需包含以下字段：
-   - name：正式姓名（中文名）
-   - handle：昵称或代号（简短，2~4 字）
-   - bio：一句简短的身份介绍（20 字以内）
-   - persona：详细人设，包括性格特点、背景故事、与 ${charName} 的关系（50~100 字）
-2. NPC 要贴合主角的世界观，关系可以是朋友、敌人、亲人、导师、对手等。
+【生成任务】
+请仔细阅读以上人设，从中提取与主角相关的线索（如亲友、仇敌、同门、下属、对手、暗恋者、被遗忘的故人等），并生成 **3~5 个 NPC**。
 
-请以**严格的 JSON 数组格式**输出，不要有其他任何文字。示例格式：
+【严格要求】
+1. 每个 NPC 必须与主角有明确的、具体的、可追溯的**关系**（例如：“幼年玩伴，现为敌对阵营的卧底”、“修仙路上的引路人，已失踪多年”、“同门师妹，暗中嫉妒主角的天赋”）。
+2. 关系必须**源自人设中的内容或合理延伸**，不能凭空捏造（比如人设里没提过修仙，就不能出现修仙设定）。
+3. 每个 NPC 需包含以下字段：
+   - name：正式姓名（中文）
+   - handle：昵称或代号（2~4 字）
+   - bio：一句简短的身份介绍（20 字以内）
+   - relation：与 ${charName} 的关系（20 字以内，必须具体）
+   - persona：详细人设，包括性格、背景、与主角的过往交集（50~100 字）
+4. NPC 的风格、世界观必须与主角人设保持一致。
+
+【输出格式】
+请以**严格的 JSON 数组格式**输出，不要有其他任何文字。示例：
 [
   {
     "name": "林暮雪",
     "handle": "暮雪",
     "bio": "清冷孤高的剑客，曾是主角的同门师妹",
-    "persona": "性格清冷寡言，剑术超群。幼时被主角从雪地中救起，因此对主角既感恩又抱有隐秘的竞争之心。..."
+    "relation": "同门师妹，因主角犯错而被迫分离",
+    "persona": "性格清冷寡言，剑术超群。幼时被主角从雪地中救起，对主角既感恩又抱有隐秘的竞争之心。..."
   }
 ]`;
 
           state.loading = true;
-          showMessage("AI 正在生成 NPC，请稍候...", "info");
+          showMessage("AI 正在基于人设生成 NPC，请稍候...", "info");
           render();
 
           try {
             const result = await roche.ai.chat({
               messages: [
                 { role: "system", content: systemPrompt },
-                { role: "user", content: "请生成。" }
+                { role: "user", content: "请根据以上主角人设，生成 NPC 列表。" }
               ],
-              temperature: 0.85,
+              temperature: 0.8,
             });
 
             let rawText = result.text || "";
-            // 清理 Markdown 代码块
             rawText = rawText.replace(/```json/g, "").replace(/```/g, "").trim();
 
             let npcs = [];
             try {
               npcs = JSON.parse(rawText);
             } catch (parseErr) {
-              // 尝试提取数组部分
               const match = rawText.match(/\[[\s\S]*\]/);
               if (match) {
                 try {
@@ -215,6 +221,13 @@ ${persona}
               throw new Error("AI 未返回有效的 NPC 列表");
             }
 
+            // 确保每个 NPC 都有 relation 字段（如果没有则占位）
+            npcs = npcs.map(n => ({
+              ...n,
+              relation: n.relation || "与主角有联系",
+              persona: n.persona || n.bio || "",
+            }));
+
             state.generatedNpcs = npcs;
             state.loading = false;
             showMessage(`✅ 成功生成 ${npcs.length} 个 NPC！点击「添加好友」即可入库。`, "success");
@@ -229,7 +242,6 @@ ${persona}
         async function handleAddNpc(npc, index) {
           try {
             await addNpcToDB(npc);
-            // 标记已添加（UI 反馈）
             state.generatedNpcs[index]._added = true;
             showMessage(`✅ ${npc.name}（${npc.handle}）已添加为好友！刷新页面即可在角色列表看到。`, "success");
             render();
@@ -255,7 +267,6 @@ ${persona}
             box-sizing: border-box;
           `;
 
-          // 标题
           const title = document.createElement("h1");
           title.textContent = "🧙 NPC 生成器";
           title.style.cssText = "font-size: 24px; margin: 0 0 16px 0; font-weight: 300;";
@@ -292,17 +303,15 @@ ${persona}
           }
           charSelect.onchange = () => {
             state.selectedCharId = charSelect.value;
-            // 切换角色时清空之前的 NPC
             state.generatedNpcs = [];
             state.message = "";
             render();
           };
           charSection.appendChild(charSelect);
 
-          // 提示：检查人设
           const hint = document.createElement("div");
           hint.style.cssText = "font-size: 12px; color: #888; margin-top: 4px;";
-          hint.textContent = "💡 生成 NPC 依赖角色的「人设（persona）」，请确保已填写完整。";
+          hint.textContent = "💡 生成的 NPC 将严格基于主角的人设（persona），确保关系紧密。";
           charSection.appendChild(hint);
           root.appendChild(charSection);
 
@@ -310,7 +319,7 @@ ${persona}
           const genSection = document.createElement("div");
           genSection.style.marginBottom = "16px";
           const genBtn = document.createElement("button");
-          genBtn.textContent = state.loading ? "⏳ 生成中..." : "② 生成 NPC";
+          genBtn.textContent = state.loading ? "⏳ 生成中..." : "② 生成 NPC（基于人设）";
           genBtn.className = "btn primary";
           genBtn.style.cssText = `
             width: 100%; padding: 12px; font-size: 16px;
@@ -366,6 +375,18 @@ ${persona}
               nameRow.appendChild(nameEl);
               card.appendChild(nameRow);
 
+              // 关系显示（高亮）
+              if (npc.relation) {
+                const relationEl = document.createElement("div");
+                relationEl.style.cssText = `
+                  font-size: 13px; color: #ffd479; margin: 4px 0 6px 0;
+                  background: rgba(255, 212, 121, 0.1); padding: 2px 8px; border-radius: 4px;
+                  display: inline-block;
+                `;
+                relationEl.textContent = "🔗 " + npc.relation;
+                card.appendChild(relationEl);
+              }
+
               const bioEl = document.createElement("div");
               bioEl.style.cssText = "font-size: 13px; color: #aaa; margin: 6px 0 8px 0;";
               bioEl.textContent = npc.bio || "";
@@ -415,7 +436,6 @@ ${persona}
 
           container.appendChild(root);
 
-          // 注入全局样式（一次）
           if (!document.getElementById("npc-generator-style")) {
             const style = document.createElement("style");
             style.id = "npc-generator-style";
